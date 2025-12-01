@@ -5,14 +5,85 @@ import ExplosionOverlay from "./ExplosionOverlay";
 
 const REACTION_EMOJIS = ["❤️", "👍", "😂", "😮", "😢", "😡"];
 
+// ----------------------
+// ROOT APP – AUTH GATE
+// ----------------------
 function App() {
+  const [session, setSession] = useState(null);
+  const [loadingSession, setLoadingSession] = useState(true);
+
+  useEffect(() => {
+    let authSub;
+
+    async function loadSession() {
+      const { data } = await supabase.auth.getSession();
+      setSession(data.session || null);
+      setLoadingSession(false);
+
+      const { data: subscription } = supabase.auth.onAuthStateChange(
+        (_event, newSession) => {
+          setSession(newSession || null);
+          setLoadingSession(false);
+        }
+      );
+
+      authSub = subscription;
+    }
+
+    loadSession();
+
+    return () => {
+      if (authSub) authSub.subscription.unsubscribe();
+    };
+  }, []);
+
+  if (loadingSession) {
+    return (
+      <div className="app-container mood-neutral">
+        <div className="chat-window inbox-window">
+          <div className="chat-header">
+            <h2>Alive Chat</h2>
+          </div>
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 14,
+              opacity: 0.8,
+            }}
+          >
+            Učitavam...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <AuthScreen />;
+  }
+
+  return <ChatApp session={session} />;
+}
+
+// ----------------------
+// CHAT APP (INBOX + ROOMS)
+// ----------------------
+function ChatApp({ session }) {
+  // "lijepo" ime za usera – mail bez @domena ili dio id-a
+  const user = session.user;
+  const userId =
+    (user?.email && user.email.split("@")[0]) ||
+    (user?.id ? user.id.slice(0, 8) : "user");
+
   const [messages, setMessages] = useState([]);
   const [activeEffect, setActiveEffect] = useState(null);
   const [showExplosion, setShowExplosion] = useState(false);
 
   const [text, setText] = useState("");
   const [mood, setMood] = useState("normal");
-  const [userId, setUserId] = useState("");
 
   const [roomId, setRoomId] = useState("");
   const [roomInput, setRoomInput] = useState("");
@@ -24,16 +95,11 @@ function App() {
   const [typingUsers, setTypingUsers] = useState([]);
   const typingChannelRef = useRef(null);
 
-  // LEVEL 3 — CHAT MOOD ENGINE
   const [chatMood, setChatMood] = useState("neutral");
 
-  // 1) user ime
-  useEffect(() => {
-    const name = prompt("Upiši svoje ime / nadimak:");
-    setUserId(name || "anon");
-  }, []);
-
-  // 2) room iz URL-a (ako postoji ?room=xyz, direkt u tu sobu)
+  // ----------------------
+  // URL → ROOM
+  // ----------------------
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const r = params.get("room");
@@ -48,13 +114,16 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     if (newRoomId) params.set("room", newRoomId);
     else params.delete("room");
+
     const newUrl =
       window.location.pathname +
       (params.toString() ? "?" + params.toString() : "");
     window.history.replaceState({}, "", newUrl);
   }
 
-  // 3) učitaj listu razgovora (inbox): sve conversation_id iz messages
+  // ----------------------
+  // INBOX – LISTA RAZGOVORA
+  // ----------------------
   useEffect(() => {
     async function loadConversations() {
       const { data, error } = await supabase
@@ -88,10 +157,9 @@ function App() {
     loadConversations();
   }, []);
 
-  // helper: update inbox kad dođe nova poruka
   function updateConversationsWithMessage(msg) {
     setConversations((prev) => {
-      const existingIndex = prev.findIndex((c) => c.id === msg.conversation_id);
+      const idx = prev.findIndex((c) => c.id === msg.conversation_id);
       const updated = {
         id: msg.conversation_id,
         lastMessage: msg.text,
@@ -99,17 +167,19 @@ function App() {
         lastAt: msg.created_at,
       };
 
-      if (existingIndex === -1) {
+      if (idx === -1) {
         return [updated, ...prev];
       }
 
       const copy = [...prev];
-      copy.splice(existingIndex, 1); // makni staru
-      return [updated, ...copy]; // nova verzija na vrh
+      copy.splice(idx, 1);
+      return [updated, ...copy];
     });
   }
 
-  // 4) učitavanje poruka za ODABRANU sobu
+  // ----------------------
+  // PORUKE U AKTIVNOJ SOBI
+  // ----------------------
   useEffect(() => {
     if (!roomId) {
       setMessages([]);
@@ -133,7 +203,7 @@ function App() {
     loadMessages();
   }, [roomId]);
 
-  // 5) globalni realtime za MESSAGES – za inbox + otvorenu sobu
+  // global realtime za messages – i inbox i otvorena soba
   useEffect(() => {
     const channel = supabase
       .channel("messages-all")
@@ -143,12 +213,12 @@ function App() {
         (payload) => {
           const msg = payload.new;
 
-          // ako je poruka za trenutnu sobu -> dodaj u messages
+          // update otvorene sobe
           setMessages((prev) =>
             msg.conversation_id === roomId ? [...prev, msg] : prev
           );
 
-          // uvijek updateaj inbox listu
+          // update inbox liste
           updateConversationsWithMessage(msg);
         }
       )
@@ -159,7 +229,9 @@ function App() {
     };
   }, [roomId]);
 
-  // 6) EFFECTS (love animacija) – po sobi
+  // ----------------------
+  // EFFECTS (LOVE)
+  // ----------------------
   useEffect(() => {
     if (!roomId) return;
 
@@ -182,7 +254,9 @@ function App() {
     };
   }, [roomId]);
 
-  // 7) REACTIONS – po sobi
+  // ----------------------
+  // REACTIONS
+  // ----------------------
   useEffect(() => {
     if (!roomId) {
       setReactionsByMessage({});
@@ -232,7 +306,9 @@ function App() {
     };
   }, [roomId]);
 
-  // 8) TYPING indikator – broadcast po sobi
+  // ----------------------
+  // TYPING indikator
+  // ----------------------
   useEffect(() => {
     if (!roomId || !userId) return;
 
@@ -263,7 +339,9 @@ function App() {
     };
   }, [roomId, userId]);
 
-  // 9) LJUTA PORUKA -> eksplozija (po sobi, za druge)
+  // ----------------------
+  // LJUTE PORUKE → EKSPLOZIJA
+  // ----------------------
   useEffect(() => {
     if (!userId || !roomId || messages.length === 0) return;
 
@@ -284,7 +362,9 @@ function App() {
     setTimeout(() => setShowExplosion(false), 2000);
   }, [userId, roomId, messages]);
 
-  // 🔥 CHAT MOOD ENGINE – gleda zadnjih 15 poruka u sobi
+  // ----------------------
+  // CHAT MOOD ENGINE
+  // ----------------------
   useEffect(() => {
     if (!messages.length) {
       setChatMood("neutral");
@@ -307,7 +387,9 @@ function App() {
     setChatMood(mood);
   }, [messages]);
 
-  // helper: detekcija love poruke
+  // ----------------------
+  // SLANJE PORUKA
+  // ----------------------
   function getMessageTypeFromText(t) {
     const n = t.toLowerCase().trim();
     if (n === "volim te" || n.startsWith("volim te")) return "love";
@@ -335,7 +417,6 @@ function App() {
 
     setText("");
 
-    // love_pair efekt
     if (type === "love") {
       const { data: lastMessages } = await supabase
         .from("messages")
@@ -377,6 +458,9 @@ function App() {
     });
   }
 
+  // ----------------------
+  // REACTIONS
+  // ----------------------
   async function handleReactionClick(messageId, emoji) {
     if (!roomId || !userId) return;
     setShowReactionPickerFor(null);
@@ -393,6 +477,9 @@ function App() {
     }
   }
 
+  // ----------------------
+  // ROOMS UTIL
+  // ----------------------
   function generateRoomId() {
     const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
     let out = "room-";
@@ -422,6 +509,7 @@ function App() {
     setRoomAndUrl("");
     setMessages([]);
     setReactionsByMessage({});
+    setTypingUsers([]);
   }
 
   const typingText =
@@ -431,7 +519,9 @@ function App() {
       ? `${typingUsers.join(", ")} tipkaju…`
       : "";
 
-  // 👉 INBOX SCREEN (nema odabrane sobe)
+  // ----------------------
+  // INBOX EKRAN
+  // ----------------------
   if (!roomId) {
     return (
       <div className={`app-container mood-${chatMood}`}>
@@ -490,7 +580,9 @@ function App() {
     );
   }
 
-  // 👉 CHAT SCREEN (odabrana soba)
+  // ----------------------
+  // CHAT EKRAN
+  // ----------------------
   return (
     <div className={`app-container mood-${chatMood}`}>
       <div className="chat-window">
@@ -571,6 +663,9 @@ function App() {
   );
 }
 
+// ----------------------
+// MESSAGE BUBBLE
+// ----------------------
 function MessageBubble({ message, isMe, reactions, onOpenReactions }) {
   const counts = reactions.reduce((acc, r) => {
     acc[r.emoji] = (acc[r.emoji] || 0) + 1;
@@ -594,6 +689,110 @@ function MessageBubble({ message, isMe, reactions, onOpenReactions }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ----------------------
+// AUTH SCREEN
+// ----------------------
+function AuthScreen() {
+  const [mode, setMode] = useState("signIn"); // "signIn" | "signUp"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    try {
+      if (mode === "signIn") {
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (signInError) throw signInError;
+      } else {
+        const { error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+        });
+        if (signUpError) throw signUpError;
+        alert("Provjeri mail (ako je ukljuđen potvrđujući mail u Supabase-u).");
+      }
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "Nešto je pošlo po zlu.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="app-container mood-neutral">
+      <div className="chat-window inbox-window">
+        <div className="chat-header">
+          <h2>Alive Chat</h2>
+        </div>
+
+        <div className="inbox-body">
+          <h3>{mode === "signIn" ? "Prijava" : "Registracija"}</h3>
+          <p className="room-sub">
+            {mode === "signIn"
+              ? "Ulogiraj se sa svojim mailom."
+              : "Napravi račun za Alive Chat."}
+          </p>
+
+          <form className="auth-form" onSubmit={handleSubmit}>
+            <input
+              type="email"
+              placeholder="Email"
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+            <input
+              type="password"
+              placeholder="Lozinka"
+              autoComplete={
+                mode === "signIn" ? "current-password" : "new-password"
+              }
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+            <button
+              className="primary-btn auth-submit"
+              type="submit"
+              disabled={loading}
+            >
+              {loading
+                ? "Pričekaj..."
+                : mode === "signIn"
+                ? "Prijavi se"
+                : "Registriraj se"}
+            </button>
+          </form>
+
+          {error && <div className="auth-error">{error}</div>}
+
+          <div className="auth-switch">
+            {mode === "signIn" ? "Nemaš račun?" : "Već imaš račun?"}{" "}
+            <button
+              type="button"
+              onClick={() =>
+                setMode((m) => (m === "signIn" ? "signUp" : "signIn"))
+              }
+            >
+              {mode === "signIn" ? "Registriraj se" : "Prijavi se"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
