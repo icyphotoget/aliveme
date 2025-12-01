@@ -5,9 +5,9 @@ import ExplosionOverlay from "./ExplosionOverlay";
 
 const REACTION_EMOJIS = ["❤️", "👍", "😂", "😮", "😢", "😡"];
 
-// ----------------------
-// ROOT APP – AUTH GATE
-// ----------------------
+// --------------------------------------------------
+// ROOT APP – brine se o sessionu (prijava / odjava)
+// --------------------------------------------------
 function App() {
   const [session, setSession] = useState(null);
   const [loadingSession, setLoadingSession] = useState(true);
@@ -68,15 +68,21 @@ function App() {
   return <ChatApp session={session} />;
 }
 
-// ----------------------
-// CHAT APP (INBOX + ROOMS)
-// ----------------------
+// --------------------------------------------------
+// CHAT APP – inbox + rooms + profiles + logout
+// --------------------------------------------------
 function ChatApp({ session }) {
-  // "lijepo" ime za usera – mail bez @domena ili dio id-a
-  const user = session.user;
-  const userId =
-    (user?.email && user.email.split("@")[0]) ||
-    (user?.id ? user.id.slice(0, 8) : "user");
+  const supaUser = session.user;
+
+  const emailName =
+    (supaUser?.email && supaUser.email.split("@")[0]) ||
+    (supaUser?.id ? supaUser.id.slice(0, 8) : "user");
+
+  const [profile, setProfile] = useState(null);
+  const [profileLoading, setProfileLoading] = useState(true);
+
+  // glavni "userId" koji koristimo u porukama
+  const userId = profile?.display_name || emailName;
 
   const [messages, setMessages] = useState([]);
   const [activeEffect, setActiveEffect] = useState(null);
@@ -97,9 +103,82 @@ function ChatApp({ session }) {
 
   const [chatMood, setChatMood] = useState("neutral");
 
-  // ----------------------
-  // URL → ROOM
-  // ----------------------
+  // ---------------- PROFILES: učitaj ili kreiraj ----------------
+  useEffect(() => {
+    async function loadProfile() {
+      setProfileLoading(true);
+      const userIdUuid = supaUser.id;
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", userIdUuid)
+        .single();
+
+      if (error && error.code !== "PGRST116") {
+        console.error("loadProfile error", error);
+        setProfileLoading(false);
+        return;
+      }
+
+      if (!data) {
+        // nema profila -> kreiraj default
+        const defaultName = emailName || "user";
+        const { data: inserted, error: insertErr } = await supabase
+          .from("profiles")
+          .insert({
+            id: userIdUuid,
+            display_name: defaultName,
+          })
+          .select()
+          .single();
+
+        if (insertErr) {
+          console.error("insert profile error", insertErr);
+          setProfileLoading(false);
+          return;
+        }
+
+        setProfile(inserted);
+        setProfileLoading(false);
+        return;
+      }
+
+      setProfile(data);
+      setProfileLoading(false);
+    }
+
+    loadProfile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supaUser.id]);
+
+  async function changeDisplayName() {
+    const current = profile?.display_name || emailName;
+    const name = prompt("Novo ime / nadimak:", current);
+    if (!name || !name.trim()) return;
+
+    const finalName = name.trim();
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .update({ display_name: finalName })
+      .eq("id", supaUser.id)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("changeDisplayName error", error);
+      return;
+    }
+
+    setProfile(data);
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+  }
+
+  // ---------------- URL → ROOM ----------------
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const r = params.get("room");
@@ -121,9 +200,7 @@ function ChatApp({ session }) {
     window.history.replaceState({}, "", newUrl);
   }
 
-  // ----------------------
-  // INBOX – LISTA RAZGOVORA
-  // ----------------------
+  // ---------------- INBOX – lista razgovora ----------------
   useEffect(() => {
     async function loadConversations() {
       const { data, error } = await supabase
@@ -177,9 +254,7 @@ function ChatApp({ session }) {
     });
   }
 
-  // ----------------------
-  // PORUKE U AKTIVNOJ SOBI
-  // ----------------------
+  // ---------------- PORUKE U SOBI ----------------
   useEffect(() => {
     if (!roomId) {
       setMessages([]);
@@ -203,7 +278,7 @@ function ChatApp({ session }) {
     loadMessages();
   }, [roomId]);
 
-  // global realtime za messages – i inbox i otvorena soba
+  // global messages realtime
   useEffect(() => {
     const channel = supabase
       .channel("messages-all")
@@ -213,12 +288,10 @@ function ChatApp({ session }) {
         (payload) => {
           const msg = payload.new;
 
-          // update otvorene sobe
           setMessages((prev) =>
             msg.conversation_id === roomId ? [...prev, msg] : prev
           );
 
-          // update inbox liste
           updateConversationsWithMessage(msg);
         }
       )
@@ -229,9 +302,7 @@ function ChatApp({ session }) {
     };
   }, [roomId]);
 
-  // ----------------------
-  // EFFECTS (LOVE)
-  // ----------------------
+  // ---------------- EFFECTS ----------------
   useEffect(() => {
     if (!roomId) return;
 
@@ -254,9 +325,7 @@ function ChatApp({ session }) {
     };
   }, [roomId]);
 
-  // ----------------------
-  // REACTIONS
-  // ----------------------
+  // ---------------- REACTIONS ----------------
   useEffect(() => {
     if (!roomId) {
       setReactionsByMessage({});
@@ -306,9 +375,7 @@ function ChatApp({ session }) {
     };
   }, [roomId]);
 
-  // ----------------------
-  // TYPING indikator
-  // ----------------------
+  // ---------------- TYPING ----------------
   useEffect(() => {
     if (!roomId || !userId) return;
 
@@ -339,9 +406,7 @@ function ChatApp({ session }) {
     };
   }, [roomId, userId]);
 
-  // ----------------------
-  // LJUTE PORUKE → EKSPLOZIJA
-  // ----------------------
+  // ---------------- ANGRY → EXPLOSION ----------------
   useEffect(() => {
     if (!userId || !roomId || messages.length === 0) return;
 
@@ -362,9 +427,7 @@ function ChatApp({ session }) {
     setTimeout(() => setShowExplosion(false), 2000);
   }, [userId, roomId, messages]);
 
-  // ----------------------
-  // CHAT MOOD ENGINE
-  // ----------------------
+  // ---------------- CHAT MOOD ENGINE ----------------
   useEffect(() => {
     if (!messages.length) {
       setChatMood("neutral");
@@ -387,9 +450,7 @@ function ChatApp({ session }) {
     setChatMood(mood);
   }, [messages]);
 
-  // ----------------------
-  // SLANJE PORUKA
-  // ----------------------
+  // ---------------- SLANJE PORUKA ----------------
   function getMessageTypeFromText(t) {
     const n = t.toLowerCase().trim();
     if (n === "volim te" || n.startsWith("volim te")) return "love";
@@ -458,9 +519,7 @@ function ChatApp({ session }) {
     });
   }
 
-  // ----------------------
-  // REACTIONS
-  // ----------------------
+  // ---------------- REACTION CLICK ----------------
   async function handleReactionClick(messageId, emoji) {
     if (!roomId || !userId) return;
     setShowReactionPickerFor(null);
@@ -477,9 +536,7 @@ function ChatApp({ session }) {
     }
   }
 
-  // ----------------------
-  // ROOMS UTIL
-  // ----------------------
+  // ---------------- ROOMS UTIL ----------------
   function generateRoomId() {
     const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
     let out = "room-";
@@ -519,16 +576,53 @@ function ChatApp({ session }) {
       ? `${typingUsers.join(", ")} tipkaju…`
       : "";
 
-  // ----------------------
-  // INBOX EKRAN
-  // ----------------------
+  if (profileLoading) {
+    return (
+      <div className={`app-container mood-${chatMood}`}>
+        <div className="chat-window inbox-window">
+          <div className="chat-header">
+            <h2>Alive Chat</h2>
+          </div>
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 14,
+              opacity: 0.8,
+            }}
+          >
+            Učitavam profil...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------------- INBOX SCREEN ----------------
   if (!roomId) {
     return (
       <div className={`app-container mood-${chatMood}`}>
         <div className="chat-window inbox-window">
           <div className="chat-header">
             <h2>Alive Chat</h2>
-            <div className="user-tag">👤 {userId}</div>
+            <div className="user-panel">
+              <button
+                className="user-name-btn"
+                type="button"
+                onClick={changeDisplayName}
+              >
+                👤 {userId}
+              </button>
+              <button
+                className="logout-btn"
+                type="button"
+                onClick={handleLogout}
+              >
+                Odjava
+              </button>
+            </div>
           </div>
 
           <div className="inbox-body">
@@ -580,9 +674,7 @@ function ChatApp({ session }) {
     );
   }
 
-  // ----------------------
-  // CHAT EKRAN
-  // ----------------------
+  // ---------------- CHAT SCREEN ----------------
   return (
     <div className={`app-container mood-${chatMood}`}>
       <div className="chat-window">
@@ -607,7 +699,23 @@ function ChatApp({ session }) {
               </div>
             </div>
           </div>
-          <div className="user-tag">👤 {userId}</div>
+
+          <div className="user-panel">
+            <button
+              className="user-name-btn"
+              type="button"
+              onClick={changeDisplayName}
+            >
+              👤 {userId}
+            </button>
+            <button
+              className="logout-btn"
+              type="button"
+              onClick={handleLogout}
+            >
+              Odjava
+            </button>
+          </div>
         </div>
 
         <div className="messages-area">
@@ -663,9 +771,9 @@ function ChatApp({ session }) {
   );
 }
 
-// ----------------------
+// --------------------------------------------------
 // MESSAGE BUBBLE
-// ----------------------
+// --------------------------------------------------
 function MessageBubble({ message, isMe, reactions, onOpenReactions }) {
   const counts = reactions.reduce((acc, r) => {
     acc[r.emoji] = (acc[r.emoji] || 0) + 1;
@@ -693,9 +801,9 @@ function MessageBubble({ message, isMe, reactions, onOpenReactions }) {
   );
 }
 
-// ----------------------
-// AUTH SCREEN
-// ----------------------
+// --------------------------------------------------
+// AUTH SCREEN (login/registracija)
+// --------------------------------------------------
 function AuthScreen() {
   const [mode, setMode] = useState("signIn"); // "signIn" | "signUp"
   const [email, setEmail] = useState("");
@@ -721,7 +829,9 @@ function AuthScreen() {
           password,
         });
         if (signUpError) throw signUpError;
-        alert("Provjeri mail (ako je ukljuđen potvrđujući mail u Supabase-u).");
+        alert(
+          "Ako je u Supabaseu uključena email potvrda, provjeri mail za potvrdu."
+        );
       }
     } catch (err) {
       console.error(err);
