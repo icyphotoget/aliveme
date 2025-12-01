@@ -17,13 +17,15 @@ function App() {
   const [roomId, setRoomId] = useState("");
   const [roomInput, setRoomInput] = useState("");
 
-  // reactions: messageId -> array of reactions
+  const [conversations, setConversations] = useState([]);
   const [reactionsByMessage, setReactionsByMessage] = useState({});
   const [showReactionPickerFor, setShowReactionPickerFor] = useState(null);
 
-  // typing indicator
   const [typingUsers, setTypingUsers] = useState([]);
   const typingChannelRef = useRef(null);
+
+  // LEVEL 3 — CHAT MOOD ENGINE
+  const [chatMood, setChatMood] = useState("neutral");
 
   // 1) user ime
   useEffect(() => {
@@ -31,7 +33,7 @@ function App() {
     setUserId(name || "anon");
   }, []);
 
-  // 2) room iz URL-a ( ?room=xxx )
+  // 2) room iz URL-a (ako postoji ?room=xyz, direkt u tu sobu)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const r = params.get("room");
@@ -44,15 +46,75 @@ function App() {
   function setRoomAndUrl(newRoomId) {
     setRoomId(newRoomId);
     const params = new URLSearchParams(window.location.search);
-    params.set("room", newRoomId);
+    if (newRoomId) params.set("room", newRoomId);
+    else params.delete("room");
     const newUrl =
-      window.location.pathname + "?" + params.toString() + window.location.hash;
+      window.location.pathname +
+      (params.toString() ? "?" + params.toString() : "");
     window.history.replaceState({}, "", newUrl);
   }
 
-  // 3) messages realtime po sobi
+  // 3) učitaj listu razgovora (inbox): sve conversation_id iz messages
   useEffect(() => {
-    if (!roomId) return;
+    async function loadConversations() {
+      const { data, error } = await supabase
+        .from("messages")
+        .select("conversation_id, text, sender_id, created_at")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.error("loadConversations error", error);
+        return;
+      }
+
+      const seen = new Set();
+      const convs = [];
+
+      (data || []).forEach((m) => {
+        if (!seen.has(m.conversation_id)) {
+          seen.add(m.conversation_id);
+          convs.push({
+            id: m.conversation_id,
+            lastMessage: m.text,
+            lastSender: m.sender_id,
+            lastAt: m.created_at,
+          });
+        }
+      });
+
+      setConversations(convs);
+    }
+
+    loadConversations();
+  }, []);
+
+  // helper: update inbox kad dođe nova poruka
+  function updateConversationsWithMessage(msg) {
+    setConversations((prev) => {
+      const existingIndex = prev.findIndex((c) => c.id === msg.conversation_id);
+      const updated = {
+        id: msg.conversation_id,
+        lastMessage: msg.text,
+        lastSender: msg.sender_id,
+        lastAt: msg.created_at,
+      };
+
+      if (existingIndex === -1) {
+        return [updated, ...prev];
+      }
+
+      const copy = [...prev];
+      copy.splice(existingIndex, 1); // makni staru
+      return [updated, ...copy]; // nova verzija na vrh
+    });
+  }
+
+  // 4) učitavanje poruka za ODABRANU sobu
+  useEffect(() => {
+    if (!roomId) {
+      setMessages([]);
+      return;
+    }
 
     async function loadMessages() {
       const { data, error } = await supabase
@@ -69,16 +131,25 @@ function App() {
     }
 
     loadMessages();
+  }, [roomId]);
 
+  // 5) globalni realtime za MESSAGES – za inbox + otvorenu sobu
+  useEffect(() => {
     const channel = supabase
-      .channel(`messages-${roomId}`)
+      .channel("messages-all")
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages" },
         (payload) => {
-          if (payload.new.conversation_id === roomId) {
-            setMessages((prev) => [...prev, payload.new]);
-          }
+          const msg = payload.new;
+
+          // ako je poruka za trenutnu sobu -> dodaj u messages
+          setMessages((prev) =>
+            msg.conversation_id === roomId ? [...prev, msg] : prev
+          );
+
+          // uvijek updateaj inbox listu
+          updateConversationsWithMessage(msg);
         }
       )
       .subscribe();
@@ -88,7 +159,7 @@ function App() {
     };
   }, [roomId]);
 
-  // 4) effects realtime (love animacija)
+  // 6) EFFECTS (love animacija) – po sobi
   useEffect(() => {
     if (!roomId) return;
 
@@ -111,16 +182,18 @@ function App() {
     };
   }, [roomId]);
 
-  // 5) reactions realtime
+  // 7) REACTIONS – po sobi
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId) {
+      setReactionsByMessage({});
+      return;
+    }
 
     async function loadReactions() {
       const { data, error } = await supabase
         .from("message_reactions")
         .select("*")
-        .eq("conversation_id", roomId)
-        .order("created_at", { ascending: true });
+        .eq("conversation_id", roomId);
 
       if (error) {
         console.error("loadReactions error", error);
@@ -145,9 +218,10 @@ function App() {
         (payload) => {
           const r = payload.new;
           if (r.conversation_id !== roomId) return;
+
           setReactionsByMessage((prev) => {
-            const existing = prev[r.message_id] || [];
-            return { ...prev, [r.message_id]: [...existing, r] };
+            const e = prev[r.message_id] || [];
+            return { ...prev, [r.message_id]: [...e, r] };
           });
         }
       )
@@ -158,7 +232,7 @@ function App() {
     };
   }, [roomId]);
 
-  // 6) typing indikator – broadcast kanal, bez baze
+  // 8) TYPING indikator – broadcast po sobi
   useEffect(() => {
     if (!roomId || !userId) return;
 
@@ -171,10 +245,9 @@ function App() {
         const otherUser = payload.userId;
         if (!otherUser || otherUser === userId) return;
 
-        setTypingUsers((prev) => {
-          if (prev.includes(otherUser)) return prev;
-          return [...prev, otherUser];
-        });
+        setTypingUsers((prev) =>
+          prev.includes(otherUser) ? prev : [...prev, otherUser]
+        );
 
         setTimeout(() => {
           setTypingUsers((prev) => prev.filter((u) => u !== otherUser));
@@ -190,7 +263,7 @@ function App() {
     };
   }, [roomId, userId]);
 
-  // 7) ljuta poruka -> eksplozija
+  // 9) LJUTA PORUKA -> eksplozija (po sobi, za druge)
   useEffect(() => {
     if (!userId || !roomId || messages.length === 0) return;
 
@@ -201,7 +274,6 @@ function App() {
     if (angryFromOthers.length === 0) return;
 
     const latest = angryFromOthers[angryFromOthers.length - 1];
-
     const key = `lastExploded_${roomId}_${userId}`;
     const lastExplodedId = localStorage.getItem(key);
 
@@ -212,9 +284,33 @@ function App() {
     setTimeout(() => setShowExplosion(false), 2000);
   }, [userId, roomId, messages]);
 
+  // 🔥 CHAT MOOD ENGINE – gleda zadnjih 15 poruka u sobi
+  useEffect(() => {
+    if (!messages.length) {
+      setChatMood("neutral");
+      return;
+    }
+
+    const recent = messages.slice(-15);
+    let angry = 0;
+    let soft = 0;
+
+    recent.forEach((m) => {
+      if (m.mood === "angry") angry++;
+      if (m.mood === "soft") soft++;
+    });
+
+    let mood = "neutral";
+    if (angry >= soft + 2 && angry >= 2) mood = "angry";
+    else if (soft >= angry && soft >= 2) mood = "soft";
+
+    setChatMood(mood);
+  }, [messages]);
+
+  // helper: detekcija love poruke
   function getMessageTypeFromText(t) {
     const n = t.toLowerCase().trim();
-    if (n === "volim te" || n === "volim te ❤️") return "love";
+    if (n === "volim te" || n.startsWith("volim te")) return "love";
     return "normal";
   }
 
@@ -239,6 +335,7 @@ function App() {
 
     setText("");
 
+    // love_pair efekt
     if (type === "love") {
       const { data: lastMessages } = await supabase
         .from("messages")
@@ -271,7 +368,6 @@ function App() {
     }
   }
 
-  // slanje "tipkam" signala
   function notifyTyping() {
     if (!typingChannelRef.current || !userId) return;
     typingChannelRef.current.send({
@@ -281,7 +377,6 @@ function App() {
     });
   }
 
-  // reakcije
   async function handleReactionClick(messageId, emoji) {
     if (!roomId || !userId) return;
     setShowReactionPickerFor(null);
@@ -298,7 +393,6 @@ function App() {
     }
   }
 
-  // random room id
   function generateRoomId() {
     const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
     let out = "room-";
@@ -320,64 +414,106 @@ function App() {
     setRoomAndUrl(id);
   }
 
-  // ekran za odabir sobe
+  function handleOpenConversation(id) {
+    setRoomAndUrl(id);
+  }
+
+  function handleBackToInbox() {
+    setRoomAndUrl("");
+    setMessages([]);
+    setReactionsByMessage({});
+  }
+
+  const typingText =
+    typingUsers.length === 1
+      ? `${typingUsers[0]} tipka…`
+      : typingUsers.length > 1
+      ? `${typingUsers.join(", ")} tipkaju…`
+      : "";
+
+  // 👉 INBOX SCREEN (nema odabrane sobe)
   if (!roomId) {
     return (
-      <div className="app-container">
-        <div className="chat-window room-screen">
+      <div className={`app-container mood-${chatMood}`}>
+        <div className="chat-window inbox-window">
           <div className="chat-header">
             <h2>Alive Chat</h2>
             <div className="user-tag">👤 {userId}</div>
           </div>
 
-          <div className="room-body">
-            <h3>Odaberi sobu</h3>
-            <p className="room-sub">
-              Upiši kod sobe ili stvori novu i pošalji link ekipi.
-            </p>
+          <div className="inbox-body">
+            <div className="inbox-top">
+              <button
+                className="primary-btn"
+                type="button"
+                onClick={handleCreateRandomRoom}
+              >
+                + Nova random soba
+              </button>
+            </div>
 
             <form className="room-form" onSubmit={handleJoinRoom}>
               <input
                 value={roomInput}
                 onChange={(e) => setRoomInput(e.target.value)}
-                placeholder="npr. ekipa, date-night, room-4f8a2c..."
+                placeholder="Upiši ID sobe (npr. ekipa, date-night...)"
               />
               <button type="submit">Join</button>
             </form>
 
-            <div className="room-divider">ili</div>
+            <div className="inbox-list-header">Razgovori</div>
 
-            <button
-              className="room-random-btn"
-              type="button"
-              onClick={handleCreateRandomRoom}
-            >
-              🎲 Kreiraj random sobu
-            </button>
+            <div className="conversation-list">
+              {conversations.length === 0 && (
+                <div className="conversation-empty">
+                  Još nema poruka. Kreiraj prvu sobu. ✨
+                </div>
+              )}
 
-            <p className="room-hint">
-              Kad uđeš u sobu, samo kopiraj URL i pošalji ga drugima.
-            </p>
+              {conversations.map((c) => (
+                <button
+                  key={c.id}
+                  className="conversation-item"
+                  type="button"
+                  onClick={() => handleOpenConversation(c.id)}
+                >
+                  <div className="conversation-title">{c.id}</div>
+                  <div className="conversation-preview">
+                    {c.lastSender}: {c.lastMessage}
+                  </div>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
     );
   }
 
-  const typingText =
-    typingUsers.length === 1
-      ? `${typingUsers[0]} tipka...`
-      : typingUsers.length > 1
-      ? `${typingUsers.join(", ")} tipkaju...`
-      : "";
-
+  // 👉 CHAT SCREEN (odabrana soba)
   return (
-    <div className="app-container">
+    <div className={`app-container mood-${chatMood}`}>
       <div className="chat-window">
-        <div className="chat-header">
-          <div>
-            <h2>Alive Chat</h2>
-            <div className="room-tag">Room: {roomId}</div>
+        <div className="chat-header chat-header-chat">
+          <div className="chat-header-left">
+            <button
+              type="button"
+              className="back-button"
+              onClick={handleBackToInbox}
+            >
+              ←
+            </button>
+            <div>
+              <h2>Alive Chat</h2>
+              <div className="room-tag">Room: {roomId}</div>
+              <div className={`mood-pill mood-pill-${chatMood}`}>
+                {chatMood === "angry"
+                  ? "🔥 Spicy chat"
+                  : chatMood === "soft"
+                  ? "💗 Soft vibes"
+                  : "🌙 Neutral"}
+              </div>
+            </div>
           </div>
           <div className="user-tag">👤 {userId}</div>
         </div>
@@ -396,10 +532,7 @@ function App() {
 
         {typingText && <div className="typing-indicator">{typingText}</div>}
 
-        <form
-          className="input-bar"
-          onSubmit={sendMessage}
-        >
+        <form className="input-bar" onSubmit={sendMessage}>
           <select value={mood} onChange={(e) => setMood(e.target.value)}>
             <option value="normal">🙂</option>
             <option value="soft">💕</option>
@@ -439,7 +572,6 @@ function App() {
 }
 
 function MessageBubble({ message, isMe, reactions, onOpenReactions }) {
-  // grupiraj reakcije po emoji
   const counts = reactions.reduce((acc, r) => {
     acc[r.emoji] = (acc[r.emoji] || 0) + 1;
     return acc;
@@ -457,7 +589,7 @@ function MessageBubble({ message, isMe, reactions, onOpenReactions }) {
         <div className="reactions-row">
           {Object.entries(counts).map(([emoji, count]) => (
             <span key={emoji} className="reaction-pill">
-              {emoji} {count > 1 && <span className="reaction-count">{count}</span>}
+              {emoji} {count > 1 && <span>{count}</span>}
             </span>
           ))}
         </div>
